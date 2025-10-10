@@ -96,7 +96,7 @@ def main():
             varespec,
             varechem,
             method="braycurtis",  # Bray-Curtis dissimilarity
-            p_cutoff=0.05,  # Significance threshold
+            p_cutoff=0.2,  # Significance threshold
         )
         print("   Analysis completed successfully!")
     except ValueError as e:

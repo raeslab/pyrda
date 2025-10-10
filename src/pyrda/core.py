@@ -386,8 +386,27 @@ def prepare_plot_data(dbrda_data):
     # Create a copy to avoid modifying original data
     data = dbrda_data.copy()
 
-    # Define the order of the y-axis (reverse order by r2adj)
-    plot_order = data.sort_values("r2adj", ascending=True).index.tolist()
+    # Define the order of the y-axis based on cumulative R² values
+    # We want features with LOWEST cumulative R² at the TOP of the plot
+    # Since matplotlib plots categorical data with first category at bottom,
+    # we need to arrange our categories in reverse order
+    if "RDAcumul_R2.adj" in data.columns:
+        # Separate features with and without cumulative R² values
+        has_cumul = data[data["RDAcumul_R2.adj"].notna()]
+        no_cumul = data[data["RDAcumul_R2.adj"].isna()]
+
+        # Sort features with cumulative R² in ascending order (lowest first)
+        cumul_order = has_cumul.sort_values("RDAcumul_R2.adj", ascending=False).index.tolist()
+
+        # Sort features without cumulative R² by individual r2adj (ascending for consistency)
+        no_cumul_order = no_cumul.sort_values("r2adj", ascending=True).index.tolist()
+
+        # For the plot order: cumulative features first (in ascending order),
+        # then non-cumulative features (reversed so highest individual R² at top)
+        plot_order = no_cumul_order + cumul_order
+    else:
+        # Fallback to r2adj if no cumulative data
+        plot_order = list(reversed(data.sort_values("r2adj", ascending=True).index.tolist()))
 
     # Identify insignificant features (those with NaN in RDAcumul_R2.adj)
     insignificant_features = data[data["RDAcumul_R2.adj"].isna()].index.tolist()
@@ -395,11 +414,11 @@ def prepare_plot_data(dbrda_data):
     # Impute missing values in RDAcumul_R2.adj with the largest non-NA value
     if "RDAcumul_R2.adj" in data.columns:
         max_val = data["RDAcumul_R2.adj"].max()
-        data["RDAcumul_R2.adj"].fillna(max_val, inplace=True)
+        data["RDAcumul_R2.adj"] = data["RDAcumul_R2.adj"].fillna(max_val)
 
     # Filter and reshape to long form
     plot_data = data[["r2adj", "RDAcumul_R2.adj"]].copy()
-    plot_data = plot_data.reset_index()
+    plot_data = plot_data.reset_index().rename(columns={'index': 'feature'})
     plot_data = pd.melt(
         plot_data,
         id_vars=["feature"],
