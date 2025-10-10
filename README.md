@@ -1,73 +1,228 @@
-<!-- badges: start -->
-[![R-CMD-check](https://github.com/raeslab/RLdbRDA/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/raeslab/RLdbRDA/actions/workflows/R-CMD-check.yaml) [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-<!-- badges: end -->
+# PyRDA: Python Distance-Based Redundancy Analysis
 
-# RLdbRDA: RaesLab distance-based Redundancy Analysis
+A Python implementation of Distance-Based Redundancy Analysis (db-RDA) as practiced in the RaesLab. This package provides a streamlined workflow for conducting db-RDA analysis on microbial datasets to identify and visualize the impact of metadata variables on community composition.
 
-The RLdbRDA package streamlines the process of conducting distance-based redundancy analysis (db-RDA) as practiced in the RaesLab, particularly for microbial datasets. It assists researchers in identifying and visualizing the impact of metadata variables on community composition.
+## Features
 
-This package employs a two-step procedure. Initially, the influence of each variable on the community composition is individually assessed using the `capscale` function from the `vegan` package. Subsequently, a stepwise procedure is employed to determine which variables, having shown significant effects in the initial step, exert the most substantial influence. For instance, if **Body Mass Index (BMI)** emerges as a significant variable with the largest effect, the process then iterates to identify another variable that, in combination with **BMI**, has the greatest combined effect (e.g., **age**). This iterative process continues, adding one variable at a time (e.g., **BMI** combined with **age**, and so on), until no further variables demonstrate a significant combined effect.
-
+- **Distance-Based Redundancy Analysis**: Perform constrained ordination to identify environmental drivers of community composition
+- **Multiple Distance Metrics**: Support for Bray-Curtis, Euclidean, Manhattan, and other distance measures
+- **Statistical Testing**: Permutation-based significance testing with multiple testing correction
+- **Forward Selection**: Stepwise model building to identify non-redundant effects
+- **Visualization**: Create publication-ready plots showing individual and cumulative effect sizes
+- **Validation**: Comprehensive input validation and error checking
 
 ## Installation
 
+### From Source
 
-RLdbRDA needs to be installed directly from GitHub using devtools. From an R console enter the commands below.
-
-
-```commandline
-library(devtools)
-install_github("raeslab/RLdbRDA")
+```bash
+git clone https://github.com/raeslab/RLdbRDA.git
+cd RLdbRDA/pyrda
+pip install -e .
 ```
 
-If you are using ```renv```, instead use the commands below to install this package.
+### Dependencies
 
-```commandline
-renv::install("raeslab/RLdbRDA")
+- Python ≥ 3.8
+- numpy ≥ 1.20.0
+- pandas ≥ 1.3.0
+- scipy ≥ 1.7.0
+- scikit-learn ≥ 1.0.0
+- matplotlib ≥ 3.5.0
+
+## Quick Start
+
+```python
+import pandas as pd
+from pyrda import rldbrda, prepare_plot_data, plot_dbrda
+
+# Load your data
+species_data = pd.read_csv("species_abundance.csv", index_col=0)
+environmental_data = pd.read_csv("environmental_variables.csv", index_col=0)
+
+# Perform db-RDA analysis
+results = rldbrda(species_data, environmental_data, method="braycurtis", p_cutoff=0.05)
+
+# Prepare and create visualization
+plot_data = prepare_plot_data(results)
+fig = plot_dbrda(plot_data)
+fig.show()
 ```
-In case you get an error `GitHub authentication credentials are not available`. You might need to install the package 'gitcreds' first using ```renv::install('gitcreds')```. Install this package and retry the command above.
 
 ## Usage
 
-To run RLdbRDA two dataframes are needed: one with the microbial abundances and one with metadata. In both cases rows should be samples/subject and columns microbiota and metadata features respectively. 
+### Basic Analysis
 
-### Notes
-  * It is recommended to **remove strongly correlated features from the metadata** before running RLdbRDA. 
-  * RLdbRDA cannot handle missing values in the metadata. **Features with many missing values should be excluded** first, next **samples/subjects with incomplete cases should be removed** (or imputed if possible).
-  * Column headers need to be compatible with glm formulas, to this end `make.names` can be used to quickly remove unsupported characters from the column names. (An error will be thrown if the column names are invalid)
+The main function `rldbrda()` performs the complete analysis workflow:
 
+```python
+from pyrda import rldbrda
 
-### Example
-
-```R
-library(RLdbRDA)
-library(vegan)
-
-data(varespec)
-data(varechem)
-
-out <- rldbrda(varespec, varechem)
-out
-
-plot_data <- prepare_plot_data(out)
-plot_data
-
-g <- plot_dbrda(plot_data)
-g
+results = rldbrda(
+    df=species_data,           # Species abundance matrix
+    meta=environmental_data,   # Environmental metadata
+    method="braycurtis",       # Distance metric
+    p_cutoff=0.05             # Significance threshold
+)
 ```
 
-![bar plot showing the single and cumulative effect of various features on the varespec dataset included in vegan](./docs/img/rldbrda_example_output.png)
+### Parameters
 
-## Contributing
+- **df**: pandas.DataFrame with samples as rows and species as columns
+- **meta**: pandas.DataFrame with samples as rows and environmental variables as columns
+- **method**: Distance metric ("braycurtis", "euclidean", "manhattan", etc.)
+- **p_cutoff**: Significance threshold for variable selection (default: 0.05)
 
-Any contributions you make are **greatly appreciated**.
+### Results Interpretation
 
-  * Found a bug or have some suggestions? Open an [issue](https://github.com/raeslab/RLdbRDA/issues).
-  * Pull requests are welcome! Though open an [issue](https://github.com/raeslab/RLdbRDA/issues) first to discuss which features/changes you wish to implement.
+The results DataFrame contains:
 
-## Contact
+- **r2**: Individual R² values for each variable
+- **r2adj**: Adjusted R² values
+- **pval**: Raw p-values from permutation tests
+- **padj**: Benjamini-Hochberg adjusted p-values
+- **RDAcumul_R2.adj**: Cumulative R² from forward selection (for significant variables)
 
-RLdbRDA was developed by [Sebastian Proost](https://sebastian.proost.science/) at the [RaesLab](https://raeslab.sites.vib.be/en) and was adopted from code written by [Sara Vieira-Silva](https://saravsilva.github.io/).
+### Visualization
 
-For commercial access inquiries, please contact [Jeroen Raes](mailto:jeroen.raes@kuleuven.vib.be).
+```python
+from pyrda import prepare_plot_data, plot_dbrda
 
+# Prepare data for plotting
+plot_data = prepare_plot_data(results)
+
+# Create horizontal bar plot
+fig = plot_dbrda(plot_data, figsize=(10, 8))
+
+# Customize colors if desired
+fig = plot_dbrda(plot_data, colors={
+    "r2adj": "#60A68B",           # Individual R²
+    "RDAcumul_R2.adj": "#1F4068"  # Cumulative R²
+})
+```
+
+## Example
+
+See `example.py` for a complete working example using the varespec/varechem datasets.
+
+```bash
+cd pyrda
+python example.py
+```
+
+## Data Requirements
+
+### Input Data Format
+
+1. **Species/Community Data**: Rows = samples, columns = species/taxa
+2. **Environmental Metadata**: Rows = samples, columns = environmental variables
+
+### Requirements
+
+- Both datasets must have identical row indices (sample names)
+- No missing values in environmental metadata
+- Column names must be valid Python identifiers
+
+### Data Validation
+
+The package includes comprehensive validation:
+
+```python
+from pyrda.validation import validate_input
+
+# This will raise informative errors if data doesn't meet requirements
+validate_input(species_data, environmental_data)
+```
+
+## Methodology
+
+PyRDA implements a two-step db-RDA procedure:
+
+1. **Individual Effects**: Calculate R² for each environmental variable using constrained ordination
+2. **Cumulative Effects**: Forward stepwise selection to identify non-redundant variable contributions
+
+### Statistical Approach
+
+- **Distance Matrix**: Computed using scipy.spatial.distance
+- **Constrained Ordination**: Approximated using Principal Coordinates Analysis + linear regression
+- **Significance Testing**: Permutation-based F-tests
+- **Multiple Testing**: Benjamini-Hochberg false discovery rate correction
+- **Forward Selection**: Greedy stepwise addition based on R² improvement
+
+## Comparison with R Implementation
+
+PyRDA is designed to produce results comparable to the original R package RLdbRDA:
+
+- **Same statistical methodology**: db-RDA with forward selection
+- **Compatible output format**: Similar result structure and column names
+- **Equivalent visualizations**: Matching plot aesthetics and interpretation
+
+### Key Differences
+
+- **Implementation**: Python/scikit-learn vs R/vegan
+- **Ordination**: Classical MDS approximation vs direct capscale
+- **Dependencies**: Pure Python ecosystem vs R/Bioconductor
+
+## Testing
+
+Run the test suite:
+
+```bash
+cd pyrda
+pytest tests/ -v
+```
+
+The tests include:
+
+- Unit tests for individual functions
+- Integration tests with example data
+- Comparison with expected R outputs (when available)
+- Edge case validation
+
+## Development
+
+### Code Quality
+
+The package uses ruff for code formatting and linting:
+
+```bash
+pip install ruff
+ruff check .
+ruff format .
+```
+
+### Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure all tests pass
+5. Run ruff for code formatting
+6. Submit a pull request
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Citation
+
+If you use PyRDA in your research, please cite:
+
+```bibtex
+@software{pyrda2024,
+  title={PyRDA: Python Distance-Based Redundancy Analysis},
+  author={Claude Code},
+  year={2024},
+  url={https://github.com/raeslab/RLdbRDA}
+}
+```
+
+## Support
+
+- **Issues**: Report bugs and request features on GitHub Issues
+- **Documentation**: See docstrings in the source code
+- **Examples**: Check the `example.py` script for usage patterns
+
+## Acknowledgments
+
+This Python implementation is based on the original R package RLdbRDA developed by Sebastian Proost for the RaesLab. The statistical methodology follows established practices in microbial ecology and community analysis.
