@@ -402,9 +402,11 @@ def prepare_plot_data(dbrda_data):
         no_cumul = data[data["RDAcumul_R2.adj"].isna()]
 
         # Sort features with cumulative R² in ascending order (lowest first)
-        cumul_order = has_cumul.sort_values("RDAcumul_R2.adj", ascending=False).index.tolist()
+        cumul_order = has_cumul.sort_values(
+            "RDAcumul_R2.adj", ascending=False
+        ).index.tolist()
 
-        # Sort features without cumulative R² by individual r2adj (ascending for consistency)
+        # Sort features without cumulative R² by individual r2adj
         no_cumul_order = no_cumul.sort_values("r2adj", ascending=True).index.tolist()
 
         # For the plot order: cumulative features first (in ascending order),
@@ -412,7 +414,9 @@ def prepare_plot_data(dbrda_data):
         plot_order = no_cumul_order + cumul_order
     else:
         # Fallback to r2adj if no cumulative data
-        plot_order = list(reversed(data.sort_values("r2adj", ascending=True).index.tolist()))
+        plot_order = list(
+            reversed(data.sort_values("r2adj", ascending=True).index.tolist())
+        )
 
     # Identify insignificant features (those with NaN in RDAcumul_R2.adj)
     insignificant_features = data[data["RDAcumul_R2.adj"].isna()].index.tolist()
@@ -424,7 +428,7 @@ def prepare_plot_data(dbrda_data):
 
     # Filter and reshape to long form
     plot_data = data[["r2adj", "RDAcumul_R2.adj"]].copy()
-    plot_data = plot_data.reset_index().rename(columns={'index': 'feature'})
+    plot_data = plot_data.reset_index().rename(columns={"index": "feature"})
     plot_data = pd.melt(
         plot_data,
         id_vars=["feature"],

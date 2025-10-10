@@ -1,7 +1,6 @@
 """Input validation functions for pyrda package."""
 
 
-
 def validate_input(df, meta):
     """
     Validate input data and metadata for compatibility.

@@ -88,7 +88,6 @@ def plot_dbrda(plot_data, figsize=(10, 8), colors=None, alpha_range=(0.5, 1.0)):
     ax.set_ylabel("Feature")
     ax.legend(loc="lower right")
 
-
     # Apply minimal theme
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)

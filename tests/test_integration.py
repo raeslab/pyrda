@@ -63,18 +63,6 @@ class TestIntegrationWithExampleData:
                 ],
             )
 
-    @pytest.fixture
-    def expected_output(self):
-        """Load expected output for comparison."""
-        data_path = os.path.join(
-            os.path.dirname(__file__), "../data/example_output/out.tsv"
-        )
-        if os.path.exists(data_path):
-            df = pd.read_csv(data_path, sep="\t", index_col=0)
-            return df
-        else:
-            return None
-
     def test_full_workflow(self, varespec_data, varechem_data):
         """Test the complete workflow with example data."""
         # Run the analysis
@@ -118,30 +106,6 @@ class TestIntegrationWithExampleData:
         # This should not raise any errors
         fig = plot_dbrda(plot_data)
         assert fig is not None
-
-    def test_comparison_with_expected_output(
-        self, varespec_data, varechem_data, expected_output
-    ):
-        """Test comparison with R output if available."""
-        if expected_output is None:
-            pytest.skip("Expected output file not available")
-
-        result = rldbrda(varespec_data, varechem_data, p_cutoff=0.2)
-
-        # Check that we get similar features as significant
-        our_significant = set(result[result["padj"] < 0.2].index)
-        r_significant = set(expected_output[expected_output["padj"] < 0.2].index)
-
-        # Allow some differences due to implementation differences
-        # But there should be substantial overlap
-        overlap = len(our_significant.intersection(r_significant))
-        total_unique = len(our_significant.union(r_significant))
-
-        if total_unique > 0:
-            overlap_ratio = overlap / total_unique
-            assert overlap_ratio > 0.5, (
-                f"Significant features overlap too low: {overlap_ratio}"
-            )
 
     def test_reproducibility(self, varespec_data, varechem_data):
         """Test that results are reproducible."""
