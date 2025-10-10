@@ -39,7 +39,7 @@ def validate_input(df, meta):
     # Check for valid column names (Python identifiers)
     invalid_cols = []
     for col in meta.columns:
-        if not col.isidentifier():
+        if not str(col).isidentifier():
             invalid_cols.append(col)
 
     if invalid_cols:
@@ -65,12 +65,20 @@ def make_valid_names(names):
     """
     valid_names = []
     for name in names:
+        # Convert to string first
+        name_str = str(name).strip()
+
+        # If empty or only whitespace, use "X"
+        if not name_str or name_str.isspace():
+            valid_names.append("X")
+            continue
+
         # Replace invalid characters with underscores
-        valid_name = "".join(c if c.isalnum() else "_" for c in str(name))
+        valid_name = "".join(c if c.isalnum() else "_" for c in name_str)
         # Ensure it doesn't start with a number
         if valid_name and valid_name[0].isdigit():
             valid_name = "X" + valid_name
-        # Ensure it's not empty
+        # Ensure it's not empty after processing
         if not valid_name:
             valid_name = "X"
         valid_names.append(valid_name)

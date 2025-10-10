@@ -119,10 +119,16 @@ def _perform_constrained_ordination(distance_matrix, constraint_var):
             f_stat = 0
         f_values.append(f_stat)
 
-    # Weight by eigenvalues
-    eigenval_weights = eigenvals[:n_coords] / np.sum(eigenvals[:n_coords])
-    overall_r2 = np.average(r2_values, weights=eigenval_weights)
-    overall_f = np.average(f_values, weights=eigenval_weights)
+    # Weight by eigenvalues (handle case where sum might be zero)
+    eigenval_sum = np.sum(eigenvals[:n_coords])
+    if eigenval_sum > 1e-10 and len(r2_values) > 0:
+        eigenval_weights = eigenvals[:n_coords] / eigenval_sum
+        overall_r2 = np.average(r2_values, weights=eigenval_weights)
+        overall_f = np.average(f_values, weights=eigenval_weights)
+    else:
+        # Fallback to simple average if eigenvalues sum to zero or no coordinates
+        overall_r2 = np.mean(r2_values) if r2_values else 0.0
+        overall_f = np.mean(f_values) if f_values else 0.0
 
     # Adjusted R²
     df_reg = constraint_matrix.shape[1]

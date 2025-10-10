@@ -101,7 +101,12 @@ class TestGetR2:
 
     def test_p_value_adjustment(self):
         """Test that p-values are properly adjusted."""
-        distance_matrix = np.eye(4) + 0.1  # Nearly identity matrix
+        # Create a more realistic distance matrix
+        np.random.seed(42)
+        distance_matrix = np.random.rand(4, 4)
+        distance_matrix = (distance_matrix + distance_matrix.T) / 2  # Make symmetric
+        np.fill_diagonal(distance_matrix, 0)  # Zero diagonal
+
         meta = pd.DataFrame(
             {"var1": [1, 2, 3, 4], "var2": [1, 1, 2, 2], "var3": [1, 2, 1, 2]}
         )
@@ -192,8 +197,14 @@ class TestRldbrda:
         """Test behavior when no features are significant."""
         # Create data with no real patterns
         np.random.seed(42)
-        df = pd.DataFrame(np.random.rand(10, 5))
-        meta = pd.DataFrame(np.random.rand(10, 3))
+        df = pd.DataFrame(
+            np.random.rand(10, 5),
+            columns=[f"species_{i}" for i in range(5)]
+        )
+        meta = pd.DataFrame(
+            np.random.rand(10, 3),
+            columns=[f"env_{i}" for i in range(3)]
+        )
 
         with pytest.raises(ValueError, match="No significant features found"):
             rldbrda(df, meta, p_cutoff=0.001)  # Very strict cutoff
