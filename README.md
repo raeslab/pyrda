@@ -200,23 +200,6 @@ ruff format .
 5. Run ruff for code formatting
 6. Submit a pull request
 
-## License
-
-MIT License - see LICENSE file for details.
-
-## Citation
-
-If you use PyRDA in your research, please cite:
-
-```bibtex
-@software{pyrda2024,
-  title={PyRDA: Python Distance-Based Redundancy Analysis},
-  author={Claude Code},
-  year={2024},
-  url={https://github.com/raeslab/RLdbRDA}
-}
-```
-
 ## Support
 
 - **Issues**: Report bugs and request features on GitHub Issues
@@ -224,5 +207,6 @@ If you use PyRDA in your research, please cite:
 - **Examples**: Check the `example.py` script for usage patterns
 
 ## Acknowledgments
+
 
 This Python implementation is based on the original R package RLdbRDA developed by Sebastian Proost for the RaesLab. The statistical methodology follows established practices in microbial ecology and community analysis.
