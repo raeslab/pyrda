@@ -1,17 +1,53 @@
-"""Core analysis functions for distance-based redundancy analysis."""
+"""Core analysis functions for distance-based redundancy analysis.
+
+The numerics reproduce what RLdbRDA does in R:
+
+* ``vegan::capscale()`` - principal coordinates of the distance matrix (keeping
+  all axes with positive eigenvalues), followed by a redundancy analysis of
+  those coordinates. Negative eigenvalues ("imaginary" inertia) are excluded
+  from R-squared and from the residual of the F statistic.
+* ``vegan::anova.cca()`` - pseudo-F with a permutation test (999 permutations
+  for the individual tests, 9999 in the forward selection).
+* ``vegan::ordiR2step()`` - forward selection on adjusted R-squared, bounded by
+  the adjusted R-squared of the model with all candidate variables.
+
+By default (``test="analytic"``) the permutation tests are not run: their
+p-values are computed from the exact moments of the permutation distribution
+(see :mod:`pyrda.moments`). With ``test="permutation"`` the permutations are
+drawn with an exact copy of R's random number generator, so ``seed=s`` gives
+the same p-values as ``set.seed(s)`` before ``RLdbRDA::rldbrda()`` in R.
+"""
+
+import warnings
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import pdist, squareform
-from scipy.stats import f
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
-from statsmodels.stats.multitest import multipletests
+from scipy.linalg import eigh
 
+from .distance import vegdist
+from .moments import GowerMoments
+from .rrandom import RRandom
 from .validation import validate_input
 
+_ZERO = np.sqrt(np.finfo(float).eps)  # vegan's tolerance for zero eigenvalues
+_EPS = _ZERO  # vegan's tolerance when counting permuted F >= observed F
+_QR_TOL = 1e-7  # tolerance of R's qr() for aliased (collinear) columns
+# Adjusted R-squared values closer than this are equal. ordiR2step compares
+# R-squared of models spanning the same space (e.g. the last candidate and the
+# full scope); in R the outcome then depends on rounding, here on exact equality.
+_TIE_TOL = 1e-10
+# test="analytic" warns when the permutation distribution's skewness exceeds
+# this: the Pearson type III curve may no longer follow it. Calibrated against
+# 99,999-permutation p-values; it flags the outlier-dominated cases where the
+# approximation fails and not the naturally skewed small-n ones.
+_MAX_SKEW = 2.0
+_TESTS = ("analytic", "permutation")
+_ALL_VARIABLES = "<All variables>"
+_CUMUL_COLUMNS = ["R2.adj", "Df", "AIC", "F", "pval", "N"]
 
-def _compute_distance_matrix(df, method="braycurtis"):
+
+def _compute_distance_matrix(df, method="bray"):
     """
     Compute distance matrix from data using specified method.
 
@@ -19,443 +55,587 @@ def _compute_distance_matrix(df, method="braycurtis"):
     ----------
     df : pandas.DataFrame
         Input data matrix.
-    method : str, default "braycurtis"
-        Distance metric to use.
+    method : str, default "bray"
+        Distance metric, see :func:`pyrda.distance.vegdist`.
 
     Returns
     -------
     numpy.ndarray
         Distance matrix.
     """
-    distances = pdist(df.values, metric=method)
-    return squareform(distances)
+    return vegdist(df, method=method)
 
 
-def _perform_constrained_ordination(distance_matrix, constraint_var):
-    """
-    Perform constrained ordination similar to vegan's capscale.
+@dataclass
+class _Ordination:
+    """Principal coordinates as used by capscale."""
 
-    Parameters
-    ----------
-    distance_matrix : numpy.ndarray
-        Distance matrix.
-    constraint_var : pandas.Series
-        Constraining variable.
+    Y: np.ndarray  # real axes, column-centred (n x k)
+    total: float  # real inertia, sum(Y**2)
+    imaginary: float  # sum of negative eigenvalues
+    adjust: float  # capscale divides distances by sqrt(n - 1) if max(d) >= 4
 
-    Returns
-    -------
-    dict
-        Dictionary containing R², adjusted R², F-statistic, and p-value.
-    """
-    n = len(constraint_var)
+    @property
+    def n(self):
+        return self.Y.shape[0]
 
-    # Convert distance matrix to principal coordinates (classical MDS)
-    # Center the squared distance matrix
-    D_squared = distance_matrix**2
-    H = np.eye(n) - np.ones((n, n)) / n
-    B = -0.5 * H @ D_squared @ H
+    def moments(self):
+        """Permutation moments of the Gower matrix (for ``test="analytic"``)."""
+        if not hasattr(self, "_moments"):
+            self._moments = GowerMoments(self.Y)
+        return self._moments
 
-    # Eigendecomposition
-    eigenvals, eigenvecs = np.linalg.eigh(B)
-    # Sort in descending order
-    idx = np.argsort(eigenvals)[::-1]
-    eigenvals = eigenvals[idx]
-    eigenvecs = eigenvecs[:, idx]
 
-    # Take only positive eigenvalues
-    pos_idx = eigenvals > 1e-8
-    eigenvals = eigenvals[pos_idx]
-    eigenvecs = eigenvecs[:, pos_idx]
+@dataclass
+class _Fit:
+    """A capscale model: constrained (CCA) and residual (CA) inertia."""
 
-    # Principal coordinates
-    coords = eigenvecs @ np.diag(np.sqrt(eigenvals))
+    Q: np.ndarray  # orthonormal basis of the centred constraints (n x rank)
+    rank: int  # rank of the constraints (vegan's qrank)
+    cca: float  # constrained inertia
+    ca: float  # residual (real) inertia
 
-    # Fit linear model: coordinates ~ constraint_variable
-    if constraint_var.dtype in ["object", "category"]:
-        # Categorical variable - create dummy variables
-        constraint_matrix = pd.get_dummies(constraint_var, drop_first=False).values
+    def df_residual(self, n):
+        return n - self.rank - 1
+
+
+def _pcoa(distance_matrix):
+    """Principal coordinates exactly as ``capscale`` -> ``wcmdscale`` does."""
+    d = np.asarray(distance_matrix, dtype=float)
+    n = d.shape[0]
+    adjust = 1.0
+    if n > 1 and d.max() >= 4 + np.finfo(float).eps:
+        adjust = np.sqrt(n - 1)
+    # Gower centring in place: one n x n copy plus the eigenvectors
+    m = np.square(d)
+    if adjust != 1.0:
+        m /= adjust**2
+    m -= m.mean(axis=0)
+    m -= m.mean(axis=1, keepdims=True)
+    m *= -0.5
+    ev, vec = eigh(m, overwrite_a=True, check_finite=False)
+    del m
+    ev, vec = ev[::-1], vec[:, ::-1]
+    keep = np.abs(ev) > max(_ZERO, _ZERO * ev[0])
+    pos = keep & (ev > _ZERO)
+    neg = keep & (ev < 0)
+    if pos.any():
+        y = vec[:, pos] * np.sqrt(ev[pos])
     else:
-        # Continuous variable
-        constraint_matrix = constraint_var.values.reshape(-1, 1)
-
-    # Remove constant columns
-    if constraint_matrix.shape[1] > 1:
-        var_mask = np.var(constraint_matrix, axis=0) > 1e-10
-        constraint_matrix = constraint_matrix[:, var_mask]
-
-    if constraint_matrix.shape[1] == 0:
-        # No variation in constraint
-        return {"r2": 0.0, "r2adj": 0.0, "F": 0.0, "pval": 1.0}
-
-    # Perform multivariate regression
-    n_coords = min(coords.shape[1], 10)  # Use first 10 coordinates
-    coords_subset = coords[:, :n_coords]
-
-    # Calculate R² for each coordinate and combine
-    r2_values = []
-    f_values = []
-
-    for i in range(n_coords):
-        reg = LinearRegression().fit(constraint_matrix, coords_subset[:, i])
-        y_pred = reg.predict(constraint_matrix)
-        r2 = r2_score(coords_subset[:, i], y_pred)
-        r2_values.append(r2)
-
-        # Calculate F-statistic
-        ss_res = np.sum((coords_subset[:, i] - y_pred) ** 2)
-        ss_tot = np.sum((coords_subset[:, i] - np.mean(coords_subset[:, i])) ** 2)
-        ss_reg = ss_tot - ss_res
-
-        if ss_tot > 0:
-            df_reg = constraint_matrix.shape[1]
-            df_res = n - df_reg - 1
-            if df_res > 0:
-                ms_reg = ss_reg / df_reg
-                ms_res = ss_res / df_res
-                f_stat = ms_reg / ms_res if ms_res > 0 else 0
-            else:
-                f_stat = 0
-        else:
-            f_stat = 0
-        f_values.append(f_stat)
-
-    # Weight by eigenvalues (handle case where sum might be zero)
-    eigenval_sum = np.sum(eigenvals[:n_coords])
-    if eigenval_sum > 1e-10 and len(r2_values) > 0:
-        eigenval_weights = eigenvals[:n_coords] / eigenval_sum
-        overall_r2 = np.average(r2_values, weights=eigenval_weights)
-        overall_f = np.average(f_values, weights=eigenval_weights)
-    else:
-        # Fallback to simple average if eigenvalues sum to zero or no coordinates
-        overall_r2 = np.mean(r2_values) if r2_values else 0.0
-        overall_f = np.mean(f_values) if f_values else 0.0
-
-    # Adjusted R²
-    df_reg = constraint_matrix.shape[1]
-    df_res = n - df_reg - 1
-    if df_res > 0 and overall_r2 < 1:
-        r2adj = 1 - (1 - overall_r2) * (n - 1) / df_res
-    else:
-        r2adj = overall_r2
-
-    # Approximate p-value using F-distribution
-    if df_res > 0 and overall_f > 0:
-        pval = 1 - f.cdf(overall_f, df_reg, df_res)
-    else:
-        pval = 1.0
-
-    return {"r2": overall_r2, "r2adj": r2adj, "F": overall_f, "pval": pval}
+        y = np.zeros((n, 1))
+    y = y - y.mean(axis=0)
+    return _Ordination(
+        Y=y, total=float((y**2).sum()), imaginary=float(ev[neg].sum()), adjust=adjust
+    )
 
 
-def get_r2_single(distance_matrix, meta, feature):
+def _is_categorical(series):
+    return not (
+        pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series)
+    )
+
+
+def _design_columns(series):
+    """Model-matrix columns for one variable (no intercept), like R's model.matrix.
+
+    Numeric and logical variables enter as one column; factors (strings,
+    categories) as treatment-coded dummies of the observed levels.
     """
-    Calculate R-squared values for a single feature.
+    if not _is_categorical(series):
+        return np.asarray(series, dtype=float).reshape(-1, 1)
+    values = (
+        series.astype(str)
+        if not isinstance(series.dtype, pd.CategoricalDtype)
+        else series
+    )
+    levels = pd.unique(values.dropna())
+    levels = sorted(levels, key=str)
+    if len(levels) <= 1:
+        # vegan adds a dummy level, giving an all-zero (aliased) column
+        return np.zeros((len(series), 1))
+    return np.column_stack([(values == lev).to_numpy(float) for lev in levels[1:]])
 
-    This function computes the R-squared and adjusted R-squared for a single feature
-    from a distance matrix and its corresponding metadata using constrained
-    ordination and permutation tests.
 
-    Parameters
-    ----------
-    distance_matrix : numpy.ndarray
-        A distance matrix in which distances between items are stored.
-    meta : pandas.DataFrame
-        A data frame containing metadata associated with the items in distance_matrix.
-    feature : str
-        A string specifying the column name in meta for which the
-        R-squared values are to be calculated.
+def _design_matrix(meta, columns):
+    return np.hstack([_design_columns(meta[c]) for c in columns])
 
-    Returns
-    -------
-    pandas.Series
-        A series with the feature name, F statistic, R-squared, adjusted R-squared,
-        number of samples, and p-value.
+
+def _orthonormal_basis(x):
+    """Basis of the centred columns of ``x``, dropping aliased ones like R's qr().
+
+    A column is aliased when its norm after removing the previous columns falls
+    below ``1e-7`` times its original norm (LINPACK ``dqrdc2``).
     """
-    constraint_var = meta[feature].dropna()
-    valid_idx = constraint_var.index
+    x = x - x.mean(axis=0)
+    basis = []
+    for col in x.T:
+        norm0 = np.linalg.norm(col)
+        ref = norm0 if norm0 > 0 else 1.0
+        resid = col.copy()
+        if basis:
+            q = np.column_stack(basis)
+            resid -= q @ (q.T @ resid)
+            resid -= q @ (q.T @ resid)  # re-orthogonalise for stability
+        norm = np.linalg.norm(resid)
+        if norm >= _QR_TOL * ref and norm > 0:
+            basis.append(resid / norm)
+    if not basis:
+        return np.zeros((x.shape[0], 0))
+    return np.column_stack(basis)
 
-    # Filter distance matrix for non-missing values
-    idx_positions = [meta.index.get_loc(i) for i in valid_idx]
-    filtered_dist = distance_matrix[np.ix_(idx_positions, idx_positions)]
 
-    # Perform constrained ordination
-    result = _perform_constrained_ordination(filtered_dist, constraint_var)
+def _fit(ordination, x):
+    """Fit constraints ``x`` to the ordination (vegan's ordConstrain)."""
+    q = _orthonormal_basis(x)
+    rank = q.shape[1]
+    cca = 0.0
+    if rank:
+        sv = np.linalg.svd(q.T @ ordination.Y, compute_uv=False)
+        lam = sv**2
+        lam = lam[np.abs(lam) >= max(_ZERO, _ZERO * lam[0])]
+        cca = float(lam.sum())
+    return _Fit(Q=q, rank=rank, cca=cca, ca=ordination.total - cca)
 
+
+def _r2(ordination, fit):
+    """R-squared and adjusted R-squared (vegan's RsquareAdj for capscale)."""
+    n = ordination.n
+    r2 = fit.cca / ordination.total
+    m = fit.rank
+    if m >= n - 1:
+        return r2, np.nan
+    return r2, 1 - (1 - r2) * (n - 1) / (n - m - 1)
+
+
+def _aic(ordination, fit):
+    """extractAIC() of a capscale model (as reported by add1/ordiR2step)."""
+    n = ordination.n
+    rss = fit.ca * (n - 1)
+    edf = fit.rank + 1
+    return n * np.log(rss / n) + 2 * edf
+
+
+def _permuted_fitted_ss(y, q, perms, max_elements=20_000_000):
+    """Constrained inertia ``||Q' Y[perm]||^2`` for every permutation."""
+    inv = np.argsort(perms, axis=1)  # Q' Y[perm] == (Q[inv])' Y
+    n, k = y.shape
+    rank = q.shape[1]
+    chunk = max(1, max_elements // max(1, (n + k) * rank))
+    out = np.empty(len(perms))
+    for start in range(0, len(perms), chunk):
+        idx = inv[start : start + chunk]
+        # one large matrix product instead of many small ones
+        z = q[idx].transpose(1, 0, 2).reshape(n, -1)  # (n, c * rank)
+        ss = ((y.T @ z) ** 2).sum(axis=0).reshape(len(idx), rank)
+        out[start : start + chunk] = ss.sum(axis=1)
+    return out
+
+
+class _Tester:
+    """How p-values are computed: the test, permutations and random stream."""
+
+    def __init__(self, test, permutations, seed):
+        if test not in _TESTS:
+            raise ValueError(f"test must be one of {_TESTS}, got {test!r}")
+        self.test = test
+        self.permutations = permutations
+        self.rng = seed if isinstance(seed, RRandom) else RRandom(seed)
+        self.skewed = []  # labels of analytic tests that may be inaccurate
+
+    def draw(self, n):
+        return self.rng.shuffle_set(n, self.permutations)
+
+    def analytic_pvalue(self, ordination, factor, weights, threshold, label):
+        """Expected permutation p-value without permuting.
+
+        Pearson type III approximation of the share of permutations reaching
+        the observed statistic, reported as ``(N p + 1) / (N + 1)``: the value
+        R's test with ``N`` permutations gives on average. Tests whose
+        permutation distribution is too skewed for the approximation (a few
+        samples dominate) are remembered for :meth:`warn_skewed`.
+        """
+        p, skew = ordination.moments().tail_and_skewness(factor, weights, threshold)
+        if abs(skew) > _MAX_SKEW:
+            self.skewed.append(label)
+        return (self.permutations * p + 1) / (self.permutations + 1)
+
+    def warn_skewed(self, where):
+        if self.skewed:
+            names = ", ".join(repr(str(s)) for s in self.skewed)
+            its, them = ("their", "them") if len(self.skewed) > 1 else ("its", "it")
+            warnings.warn(
+                f"{where}: the analytic p-value may be inaccurate for {names}: "
+                f"{its} permutation distribution is strongly skewed (a few samples "
+                f"dominate the variation). Use test='permutation' to check {them}.",
+                stacklevel=3,
+            )
+
+
+def _test_model(ordination, fit, tester, label=None):
+    """F statistic and p-value of a single model (vegan's anova.cca)."""
+    n = ordination.n
+    perms = None
+    if tester.test == "permutation":
+        # vegan draws the permutations before checking the model
+        perms = tester.draw(n)
+    if fit.rank == 0 or fit.cca == 0:
+        return 0.0, np.nan
+    r = fit.df_residual(n)
+    if r <= 0 or fit.ca <= 0:
+        return np.nan, np.nan
+    f0 = (fit.cca / fit.rank) / (fit.ca / r)
+    if tester.test == "analytic":
+        # F(perm) >= F0  <=>  tr(H P G P') >= observed constrained inertia
+        weights = np.ones(fit.rank)
+        return f0, tester.analytic_pvalue(ordination, fit.Q, weights, fit.cca, label)
+    num = _permuted_fitted_ss(ordination.Y, fit.Q, perms)
+    den = fit.cca + fit.ca - num
+    f_perm = (num / fit.rank) / (den / r)
+    pval = (np.sum(f_perm >= f0 - _EPS) + 1) / (len(perms) + 1)
+    return f0, float(pval)
+
+
+def _test_nested(ordination, small, big, tester, label=None):
+    """F test of ``big`` against nested ``small`` (vegan's anovaCCAlist)."""
+    n = ordination.n
+    perms = tester.draw(n) if tester.test == "permutation" else None
+    df = small.df_residual(n) - big.df_residual(n)
+    resdf = big.df_residual(n)
+    if df < 1 or resdf <= 0:
+        return np.nan, np.nan
+    fval = (small.ca - big.ca) / df / (big.ca / resdf)
+    if tester.test == "analytic":
+        # F(perm) >= fval  <=>  tr(((1 + c) H_big - H_small) P G P') >= c * total
+        c = fval * df / resdf
+        factor = np.hstack([big.Q, small.Q])
+        weights = np.r_[np.full(big.rank, 1 + c), np.full(small.rank, -1.0)]
+        total = big.cca + big.ca
+        p = tester.analytic_pvalue(ordination, factor, weights, c * total, label)
+        return fval, p
+    num_small = _permuted_fitted_ss(ordination.Y, small.Q, perms)
+    num_big = _permuted_fitted_ss(ordination.Y, big.Q, perms)
+    pscale = (big.cca + big.ca - num_big) / resdf
+    f_perm = (num_big - num_small) / df / pscale
+    pval = (np.sum(f_perm >= fval - _EPS) + 1) / (len(perms) + 1)
+    return fval, float(pval)
+
+
+def _r2_single(ordination_cache, distance_matrix, meta, feature, tester):
+    values = meta[feature]
+    keep = values.notna().to_numpy()
+    if keep.all():
+        ordination = ordination_cache()
+    else:
+        idx = np.flatnonzero(keep)
+        ordination = _pcoa(np.asarray(distance_matrix)[np.ix_(idx, idx)])
+    fit = _fit(ordination, _design_columns(values[keep]))
+    if fit.rank == 0:
+        warnings.warn(
+            f"variable {feature!r} has no variation: it cannot explain anything",
+            stacklevel=3,
+        )
+    r2, r2adj = _r2(ordination, fit)
+    f0, pval = _test_model(ordination, fit, tester, label=feature)
     return pd.Series(
         {
             "feature": feature,
-            "Fa": result["F"],
-            "r2": result["r2"],
-            "r2adj": result["r2adj"],
-            "N": len(constraint_var),
-            "pval": result["pval"],
+            "Fa": f0,
+            "r2": r2,
+            "r2adj": r2adj,
+            "N": int(keep.sum()),
+            "pval": pval,
         }
     )
 
 
-def get_r2(distance_matrix, meta):
+def get_r2_single(
+    distance_matrix, meta, feature, test="analytic", permutations=999, seed=None
+):
+    """
+    Calculate R-squared values for a single feature.
+
+    Equivalent to ``capscale(distmat ~ meta[, feature], na.action = na.omit)``
+    followed by ``anova.cca()`` and ``RsquareAdj()`` in R. Samples with a
+    missing value for ``feature`` are dropped.
+
+    Parameters
+    ----------
+    distance_matrix : numpy.ndarray
+        A square distance matrix.
+    meta : pandas.DataFrame
+        Metadata, rows matching the rows of ``distance_matrix``.
+    feature : str
+        The column of ``meta`` to test.
+    test : {"analytic", "permutation"}, default "analytic"
+        "analytic" gives the p-value of vegan's permutation test without
+        permuting, from the exact mean, variance and skewness of the
+        permutation distribution (Pearson type III). It warns, naming the
+        variables, when that distribution is too skewed for the approximation;
+        check those with "permutation". "permutation" runs vegan's permutation
+        test itself, with R's random number generator.
+    permutations : int, default 999
+        Number of permutations (as ``anova.cca`` in R). "analytic" reports the
+        p-value on the same scale: ``(N p + 1) / (N + 1)``, the value a test
+        with ``N`` permutations gives on average.
+    seed : int or RRandom, optional
+        Seed for R's random number generator (``set.seed()`` equivalent); only
+        used by ``test="permutation"``.
+
+    Returns
+    -------
+    pandas.Series
+        The feature name, F statistic (``Fa``), R-squared, adjusted R-squared,
+        number of samples and p-value.
+    """
+    tester = _Tester(test, permutations, seed)
+    full = _cached_pcoa(distance_matrix)
+    result = _r2_single(full, distance_matrix, meta, feature, tester)
+    tester.warn_skewed("get_r2_single")
+    return result
+
+
+def _cached_pcoa(distance_matrix):
+    cache = {}
+
+    def get():
+        if "pcoa" not in cache:
+            cache["pcoa"] = _pcoa(distance_matrix)
+        return cache["pcoa"]
+
+    return get
+
+
+def _p_adjust_bh(p):
+    """R's ``p.adjust(p, "BH")``; missing p-values are left out of the count."""
+    p = np.asarray(p, dtype=float)
+    out = np.full_like(p, np.nan)
+    ok = ~np.isnan(p)
+    pv = p[ok]
+    lp = len(pv)
+    if lp == 0:
+        return out
+    if lp == 1:
+        out[ok] = pv
+        return out
+    o = np.argsort(-pv, kind="stable")
+    i = np.arange(lp, 0, -1)
+    adj = np.minimum(1, np.minimum.accumulate(lp / i * pv[o]))
+    res = np.empty(lp)
+    res[o] = adj
+    out[ok] = res
+    return out
+
+
+def get_r2(distance_matrix, meta, test="analytic", permutations=999, seed=None):
     """
     Calculate R-squared values for all features across distance matrix.
 
-    This function applies get_r2_single to each feature in the metadata dataframe
-    and calculates the R-squared and adjusted R-squared using constrained ordination
-    and permutation tests for all features. It also adjusts p-values using the
-    Benjamini-Hochberg method.
+    Applies :func:`get_r2_single` to each column of ``meta`` (in order, sharing
+    one random stream as R does) and adds Benjamini-Hochberg adjusted
+    p-values.
 
     Parameters
     ----------
     distance_matrix : numpy.ndarray
-        A distance matrix containing distances between sampled entities.
+        A square distance matrix.
     meta : pandas.DataFrame
-        A dataframe containing metadata associated with distance_matrix.
+        Metadata, rows matching the rows of ``distance_matrix``.
+    test : {"analytic", "permutation"}, default "analytic"
+        See :func:`get_r2_single`.
+    permutations : int, default 999
+        Number of permutations per feature.
+    seed : int or RRandom, optional
+        Seed for R's random number generator (``set.seed()`` equivalent).
 
     Returns
     -------
     pandas.DataFrame
-        A dataframe with rows for each feature and columns for the feature name,
-        F statistic, R-squared, adjusted R-squared, number of samples,
-        raw p-values, and Benjamini-Hochberg adjusted p-values.
+        One row per feature with columns feature, Fa, r2, r2adj, N, pval and
+        padj (Benjamini-Hochberg).
     """
-    features = meta.columns
-    results = []
-
-    for feature in features:
-        result = get_r2_single(distance_matrix, meta, feature)
-        results.append(result)
-
-    results_df = pd.DataFrame(results)
-    results_df.set_index("feature", inplace=True)
-
-    # Adjust p-values using Benjamini-Hochberg method
-    rejected, padj, alpha_sidak, alpha_bonf = multipletests(
-        results_df["pval"], method="fdr_bh"
-    )
-    results_df["padj"] = padj
-
-    return results_df
+    tester = _Tester(test, permutations, seed)
+    full = _cached_pcoa(distance_matrix)
+    rows = [
+        _r2_single(full, distance_matrix, meta, feature, tester)
+        for feature in meta.columns
+    ]
+    tester.warn_skewed("get_r2")
+    results = pd.DataFrame(rows)
+    results.index = results["feature"].tolist()
+    results["N"] = results["N"].astype(int)
+    results["padj"] = _p_adjust_bh(results["pval"])
+    return results
 
 
-def get_cumulative(distance_matrix, meta):
+def get_cumulative(
+    distance_matrix, meta, test="analytic", permutations=9999, seed=None
+):
     """
     Perform cumulative db-RDA analysis using forward stepwise selection.
 
-    This function performs forward stepwise distance-based redundancy analysis (db-RDA)
-    to determine the cumulative effects of metadata variables on a distance matrix.
+    Mirrors RLdbRDA's ``get_cumul()``: ``ordiR2step(capscale(d ~ 1),
+    scope = all variables, Pin = 1, R2scope = TRUE, permutations = 9999)``.
+    At each step the variable giving the largest adjusted R-squared is added,
+    as long as it increases the adjusted R-squared and does not exceed that of
+    the model with all variables. Because ``Pin = 1`` the p-values are
+    reported but never used to stop the selection.
 
     Parameters
     ----------
     distance_matrix : numpy.ndarray
-        A distance matrix where rows and columns correspond to samples.
+        A square distance matrix.
     meta : pandas.DataFrame
-        A dataframe containing metadata for each sample in distance_matrix.
+        Candidate variables (no missing values).
+    test : {"analytic", "permutation"}, default "analytic"
+        Test used for the reported F and p-value of each step (see
+        :func:`get_r2_single`); it never changes which variables are selected.
+    permutations : int, default 9999
+        Number of permutations per step.
+    seed : int or RRandom, optional
+        Seed for R's random number generator (``set.seed()`` equivalent).
 
     Returns
     -------
     pandas.DataFrame
-        A dataframe with the R-squared values for each variable added sequentially
-        into the ordination model.
+        One row per selected variable (in order of selection) plus a final
+        ``"<All variables>"`` row, with columns ``RDAcumul_R2.adj``,
+        ``RDAcumul_Df``, ``RDAcumul_AIC``, ``RDAcumul_F``, ``RDAcumul_pval``
+        and ``RDAcumul_N``.
     """
-    features = list(meta.columns)
-    selected_features = []
-    results = []
+    tester = _Tester(test, permutations, seed)
+    if meta.isnull().any().any():
+        raise ValueError("Missing values found in metadata.")
+    ordination = _pcoa(distance_matrix)
+    n = ordination.n
+    scope = list(meta.columns)
+    columns = {c: _design_columns(meta[c]) for c in scope}
 
-    # Convert distance matrix to principal coordinates once
-    n = distance_matrix.shape[0]
-    D_squared = distance_matrix**2
-    H = np.eye(n) - np.ones((n, n)) / n
-    B = -0.5 * H @ D_squared @ H
+    def fit_of(terms):
+        if not terms:
+            return _Fit(Q=np.zeros((n, 0)), rank=0, cca=0.0, ca=ordination.total)
+        return _fit(ordination, np.hstack([columns[t] for t in terms]))
 
-    eigenvals, eigenvecs = np.linalg.eigh(B)
-    idx = np.argsort(eigenvals)[::-1]
-    eigenvals = eigenvals[idx]
-    eigenvecs = eigenvecs[:, idx]
+    r2_all = _r2(ordination, fit_of(scope))[1]
+    if np.isnan(r2_all):
+        raise ValueError("R2 cannot be adjusted in upper scope (too many terms?)")
 
-    pos_idx = eigenvals > 1e-8
-    eigenvals = eigenvals[pos_idx]
-    eigenvecs = eigenvecs[:, pos_idx]
-
-    n_coords = min(len(eigenvals), 10)
-    coords = eigenvecs[:, :n_coords] @ np.diag(np.sqrt(eigenvals[:n_coords]))
-
-    while len(selected_features) < len(features):
-        best_feature = None
-        best_r2 = -1
-        best_result = None
-
-        # Try adding each remaining feature
-        for feature in features:
-            if feature in selected_features:
-                continue
-
-            # Current feature set + candidate feature
-            current_features = selected_features + [feature]
-            current_meta = meta[current_features]
-
-            # Create design matrix
-            design_matrix = []
-            for col in current_features:
-                if current_meta[col].dtype in ["object", "category"]:
-                    # Categorical variable
-                    dummies = pd.get_dummies(current_meta[col], drop_first=False)
-                    design_matrix.append(dummies.values)
-                else:
-                    # Continuous variable
-                    design_matrix.append(current_meta[col].values.reshape(-1, 1))
-
-            if design_matrix:
-                X = np.hstack(design_matrix)
-                # Remove constant columns
-                var_mask = np.var(X, axis=0) > 1e-10
-                X = X[:, var_mask]
-
-                if X.shape[1] > 0:
-                    # Calculate R² for multivariate regression
-                    r2_values = []
-                    for i in range(n_coords):
-                        reg = LinearRegression().fit(X, coords[:, i])
-                        y_pred = reg.predict(X)
-                        r2 = r2_score(coords[:, i], y_pred)
-                        r2_values.append(r2)
-
-                    # Weight by eigenvalues
-                    eigenval_weights = eigenvals[:n_coords] / np.sum(
-                        eigenvals[:n_coords]
-                    )
-                    overall_r2 = np.average(r2_values, weights=eigenval_weights)
-
-                    # Adjusted R²
-                    df_reg = X.shape[1]
-                    df_res = n - df_reg - 1
-                    if df_res > 0 and overall_r2 < 1:
-                        r2adj = 1 - (1 - overall_r2) * (n - 1) / df_res
-                    else:
-                        r2adj = overall_r2
-
-                    if r2adj > best_r2:
-                        best_r2 = r2adj
-                        best_feature = feature
-                        best_result = {
-                            "feature": feature,
-                            "R2.adj": r2adj,
-                            "Df": 1,  # Simplified
-                            "AIC": 0,  # Placeholder
-                            "F": 0,  # Placeholder
-                            "pval": 0.05,  # Placeholder
-                            "N": n,
-                        }
-
-        if best_feature is None:
+    selected = []
+    current = fit_of(selected)
+    r2_previous = 0.0
+    rows = []
+    while len(selected) < len(scope):
+        candidates = [t for t in scope if t not in selected]
+        fits = [fit_of(selected + [t]) for t in candidates]
+        r2_adds = np.array([_r2(ordination, ft)[1] for ft in fits])
+        r2_adds = np.where(np.isnan(r2_adds), 0.0, r2_adds)
+        # which.max(): first of the (numerically) tied maxima
+        best = int(np.flatnonzero(r2_adds >= r2_adds.max() - _TIE_TOL)[0])
+        improves = r2_adds[best] > r2_previous + _TIE_TOL
+        if not (improves and r2_adds[best] <= r2_all + _TIE_TOL):
             break
+        new = fits[best]
+        if current.rank == 0:
+            f_val, p_val = _test_model(ordination, new, tester, candidates[best])
+        else:
+            f_val, p_val = _test_nested(
+                ordination, current, new, tester, candidates[best]
+            )
+        df_added = new.rank - current.rank
+        if df_added < 1:
+            f_val, p_val = np.nan, np.nan
+        selected.append(candidates[best])
+        current = new
+        r2_previous = min(r2_adds[best], r2_all)  # a tie with the scope is equal
+        rows.append(
+            [r2_previous, df_added, _aic(ordination, new), f_val, p_val, len(meta)]
+        )
 
-        selected_features.append(best_feature)
-        results.append(best_result)
+    tester.warn_skewed("get_cumulative")
+    if not rows:
+        warnings.warn(
+            "no variable improved the adjusted R-squared: nothing was selected "
+            "(RLdbRDA stops with an error in this case)",
+            stacklevel=2,
+        )
+    rows.append([r2_all, np.nan, np.nan, np.nan, np.nan, len(meta)])
+    result = pd.DataFrame(
+        rows,
+        index=selected + [_ALL_VARIABLES],
+        columns=[f"RDAcumul_{c}" for c in _CUMUL_COLUMNS],
+    )
+    result["RDAcumul_N"] = result["RDAcumul_N"].astype(int)
+    return result
 
-        # Stop if improvement is minimal
-        if (
-            len(results) > 1
-            and abs(results[-1]["R2.adj"] - results[-2]["R2.adj"]) < 0.001
-        ):
-            break
 
-    # Convert to DataFrame with proper column names
-    if results:
-        results_df = pd.DataFrame(results)
-        results_df.set_index("feature", inplace=True)
-        # Rename columns to match R output
-        results_df.columns = [f"RDAcumul_{col}" for col in results_df.columns]
-    else:
-        # Empty DataFrame if no features selected
-        results_df = pd.DataFrame()
-
-    return results_df
+def _combine(r2, cumul):
+    """R's combine_data(): merge, then order by r2 and cumulative R2.adj."""
+    combined = r2.join(cumul, how="outer")
+    combined = combined.loc[sorted(combined.index, key=str)]
+    combined = combined.sort_values(
+        "r2", ascending=False, kind="stable", na_position="last"
+    )
+    combined = combined.sort_values(
+        "RDAcumul_R2.adj", ascending=True, kind="stable", na_position="last"
+    )
+    return combined
 
 
 def prepare_plot_data(dbrda_data):
     """
     Prepare data for plotting db-RDA results.
 
-    This function takes the combined db-RDA results and prepares them for visualization
-    by restructuring the data, imputing missing values, and adding aesthetics
-    to indicate the significance of features.
+    Same as RLdbRDA's ``prepare_plot_data()``: the plot order is the reversed
+    row order of the results, features that were not selected in the
+    cumulative model are flagged as not significant, and their cumulative
+    R-squared is set to the largest one (that of ``"<All variables>"``).
 
     Parameters
     ----------
     dbrda_data : pandas.DataFrame
-        A dataframe from the output of rldbrda function containing
-        R-squared and cumulative R-squared values for metadata variables.
+        Output of :func:`rldbrda`.
 
     Returns
     -------
     pandas.DataFrame
-        A tidied long-form dataframe suitable for plotting.
+        Long-form data with columns ``feature``, ``variable``, ``value`` and
+        ``significant``; ``feature`` is categorical in plot order.
     """
-    # Create a copy to avoid modifying original data
     data = dbrda_data.copy()
+    plot_order = list(reversed(data.index.tolist()))
+    insignificant = set(data.index[data["RDAcumul_R2.adj"].isna()])
+    max_val = data["RDAcumul_R2.adj"].max()
+    data["RDAcumul_R2.adj"] = data["RDAcumul_R2.adj"].fillna(max_val)
+    data = data[data.index != _ALL_VARIABLES]
 
-    # Define the order of the y-axis based on cumulative R² values
-    # We want features with LOWEST cumulative R² at the TOP of the plot
-    # Since matplotlib plots categorical data with first category at bottom,
-    # we need to arrange our categories in reverse order
-    if "RDAcumul_R2.adj" in data.columns:
-        # Separate features with and without cumulative R² values
-        has_cumul = data[data["RDAcumul_R2.adj"].notna()]
-        no_cumul = data[data["RDAcumul_R2.adj"].isna()]
-
-        # Sort features with cumulative R² in ascending order (lowest first)
-        cumul_order = has_cumul.sort_values(
-            "RDAcumul_R2.adj", ascending=False
-        ).index.tolist()
-
-        # Sort features without cumulative R² by individual r2adj
-        no_cumul_order = no_cumul.sort_values("r2adj", ascending=True).index.tolist()
-
-        # For the plot order: cumulative features first (in ascending order),
-        # then non-cumulative features (reversed so highest individual R² at top)
-        plot_order = no_cumul_order + cumul_order
-    else:
-        # Fallback to r2adj if no cumulative data
-        plot_order = list(
-            reversed(data.sort_values("r2adj", ascending=True).index.tolist())
-        )
-
-    # Identify insignificant features (those with NaN in RDAcumul_R2.adj)
-    insignificant_features = data[data["RDAcumul_R2.adj"].isna()].index.tolist()
-
-    # Impute missing values in RDAcumul_R2.adj with the largest non-NA value
-    if "RDAcumul_R2.adj" in data.columns:
-        max_val = data["RDAcumul_R2.adj"].max()
-        data["RDAcumul_R2.adj"] = data["RDAcumul_R2.adj"].fillna(max_val)
-
-    # Filter and reshape to long form
-    plot_data = data[["r2adj", "RDAcumul_R2.adj"]].copy()
-    plot_data = plot_data.reset_index().rename(columns={"index": "feature"})
-    plot_data = pd.melt(
-        plot_data,
-        id_vars=["feature"],
-        value_vars=["r2adj", "RDAcumul_R2.adj"],
-        var_name="variable",
-        value_name="value",
+    rows = []
+    for name, rec in data.iterrows():
+        sig = 0 if name in insignificant else 1
+        for variable in ("r2adj", "RDAcumul_R2.adj"):
+            rows.append((name, variable, float(rec[variable]), sig))
+    plot_data = pd.DataFrame(
+        rows, columns=["feature", "variable", "value", "significant"]
     )
-
-    # Add significance indicator
-    plot_data["significant"] = plot_data["feature"].apply(
-        lambda x: 0 if x in insignificant_features else 1
-    )
-
-    # Set proper factor levels for ordering
     plot_data["feature"] = pd.Categorical(plot_data["feature"], categories=plot_order)
-
     return plot_data
 
 
-def rldbrda(df, meta, method="braycurtis", p_cutoff=0.05):
+def rldbrda(
+    df,
+    meta,
+    method="bray",
+    p_cutoff=0.05,
+    test="analytic",
+    permutations=999,
+    cumul_permutations=9999,
+    seed=None,
+):
     """
     Distance-Based Redundancy Analysis workflow.
 
-    This function executes a full db-RDA analysis on a given dataset and its
-    corresponding metadata. It validates input, calculates pairwise distances,
-    determines R-squared values for each metadata variable, filters variables
-    based on significance, and performs cumulative db-RDA on significant variables.
+    Python equivalent of ``RLdbRDA::rldbrda()``: validates the input,
+    computes the distance matrix, tests every metadata variable on its own,
+    and runs forward selection on the variables with a BH-adjusted p-value
+    below ``p_cutoff``.
 
     Parameters
     ----------
@@ -465,45 +645,42 @@ def rldbrda(df, meta, method="braycurtis", p_cutoff=0.05):
     meta : pandas.DataFrame
         A dataframe where rows correspond to the samples in 'df' and columns
         contain metadata variables.
-    method : str, default "braycurtis"
-        A string indicating the distance measure to be used.
+    method : str, default "bray"
+        Distance measure, any ``vegan::vegdist`` method (see
+        :func:`pyrda.distance.vegdist`).
     p_cutoff : float, default 0.05
-        A significance level for determining which metadata variables to include
-        in subsequent analysis.
+        Variables with ``padj < p_cutoff`` enter the forward selection.
+    test : {"analytic", "permutation"}, default "analytic"
+        "analytic" gives R's permutation p-values within their own Monte Carlo
+        error without permuting: much faster, and deterministic.
+        "permutation" runs the permutation tests and, with ``seed``,
+        reproduces R exactly. See :func:`get_r2_single`.
+    permutations : int, default 999
+        Permutations for the per-variable tests.
+    cumul_permutations : int, default 9999
+        Permutations for the tests reported in the forward selection.
+    seed : int, optional
+        Seed for R's random number generator, used by ``test="permutation"``:
+        ``seed=s`` reproduces ``set.seed(s); rldbrda(df, meta)`` in R exactly.
 
     Returns
     -------
     pandas.DataFrame
-        A dataframe with combined R-squared and cumulative R-squared values for
-        significant metadata variables, ordered by R-squared values.
+        The same table as RLdbRDA: one row per feature plus an
+        ``"<All variables>"`` row, ordered by cumulative adjusted R-squared
+        (selected features) and then by R-squared.
     """
-    # Validate input
+    rng = _Tester(test, permutations, seed).rng  # also validates `test`
     validate_input(df, meta)
 
-    # Compute distance matrix
     distance_matrix = _compute_distance_matrix(df, method=method)
+    r2_results = get_r2(distance_matrix, meta, test, permutations, rng)
 
-    # Calculate individual R² values
-    r2_results = get_r2(distance_matrix, meta)
-
-    # Select significant variables
-    significant_features = r2_results[r2_results["padj"] < p_cutoff].index.tolist()
-
+    significant_features = r2_results.index[r2_results["padj"] < p_cutoff].tolist()
     if len(significant_features) < 1:
         raise ValueError("No significant features found, cannot continue!")
 
-    # Perform cumulative analysis on significant features
-    cumul_results = get_cumulative(distance_matrix, meta[significant_features])
-
-    # Combine results
-    combined = r2_results.join(cumul_results, how="left")
-
-    # Sort by r2, then by cumulative R2.adj
-    combined = combined.sort_values(["r2"], ascending=False)
-    if "RDAcumul_R2.adj" in combined.columns:
-        # Secondary sort by cumulative R2.adj for tied r2 values
-        combined = combined.sort_values(
-            ["RDAcumul_R2.adj"], ascending=True, na_position="last"
-        )
-
-    return combined
+    cumul_results = get_cumulative(
+        distance_matrix, meta[significant_features], test, cumul_permutations, rng
+    )
+    return _combine(r2_results, cumul_results)

@@ -7,7 +7,9 @@ and visualizing the impact of metadata variables on community composition.
 """
 
 from .core import get_cumulative, get_r2, get_r2_single, prepare_plot_data, rldbrda
+from .distance import vegdist
 from .plotting import plot_dbrda
+from .rrandom import RRandom
 from .validation import validate_input
 
 __version__ = "0.1.0"
@@ -22,4 +24,6 @@ __all__ = [
     "prepare_plot_data",
     "plot_dbrda",
     "validate_input",
+    "vegdist",
+    "RRandom",
 ]

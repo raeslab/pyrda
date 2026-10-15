@@ -15,9 +15,7 @@ class TestIntegrationWithExampleData:
     @pytest.fixture
     def varespec_data(self):
         """Load varespec test data."""
-        data_path = os.path.join(
-            os.path.dirname(__file__), "../data/varespec.tsv"
-        )
+        data_path = os.path.join(os.path.dirname(__file__), "../data/varespec.tsv")
         if os.path.exists(data_path):
             df = pd.read_csv(data_path, sep="\t", index_col=0)
             return df
@@ -33,9 +31,7 @@ class TestIntegrationWithExampleData:
     @pytest.fixture
     def varechem_data(self):
         """Load varechem test data."""
-        data_path = os.path.join(
-            os.path.dirname(__file__), "../data/varechem.tsv"
-        )
+        data_path = os.path.join(os.path.dirname(__file__), "../data/varechem.tsv")
         if os.path.exists(data_path):
             df = pd.read_csv(data_path, sep="\t", index_col=0)
             return df
@@ -108,13 +104,21 @@ class TestIntegrationWithExampleData:
         assert fig is not None
 
     def test_reproducibility(self, varespec_data, varechem_data):
-        """Test that results are reproducible."""
-        # Run analysis twice
+        """Analytic results are deterministic; permutations need a seed."""
         result1 = rldbrda(varespec_data, varechem_data, p_cutoff=0.2)
         result2 = rldbrda(varespec_data, varechem_data, p_cutoff=0.2)
-
-        # Results should be identical
         pd.testing.assert_frame_equal(result1, result2)
+        kw = {"p_cutoff": 0.2, "test": "permutation", "seed": 3}
+        result1 = rldbrda(varespec_data, varechem_data, **kw)
+        result2 = rldbrda(varespec_data, varechem_data, **kw)
+        pd.testing.assert_frame_equal(result1, result2)
+
+    def test_tests_agree_on_statistics(self, varespec_data, varechem_data):
+        """The choice of test only changes p-values, not the effect sizes."""
+        perm = rldbrda(varespec_data, varechem_data, test="permutation", seed=1)
+        analytic = rldbrda(varespec_data, varechem_data)
+        cols = ["Fa", "r2", "r2adj"]
+        pd.testing.assert_frame_equal(perm.loc[analytic.index, cols], analytic[cols])
 
     def test_different_distance_methods(self, varespec_data, varechem_data):
         """Test with different distance methods."""
@@ -152,8 +156,10 @@ class TestIntegrationWithExampleData:
         )
         small_varechem = varechem_data.iloc[:3, :3]
 
-        result = rldbrda(small_varespec, small_varechem, p_cutoff=1.0)
-        assert isinstance(result, pd.DataFrame)
+        # with 3 samples every permutation p-value is large: nothing passes,
+        # as in R
+        with pytest.raises(ValueError, match="No significant features"):
+            rldbrda(small_varespec, small_varechem, p_cutoff=0.5, seed=1)
 
     def test_categorical_variables(self, varespec_data):
         """Test with categorical metadata variables."""
@@ -166,6 +172,11 @@ class TestIntegrationWithExampleData:
             index=varespec_data.index,
         )
 
-        result = rldbrda(varespec_data, categorical_meta, p_cutoff=1.0)
+        result = rldbrda(varespec_data, categorical_meta, p_cutoff=1.0, seed=1)
         assert isinstance(result, pd.DataFrame)
-        assert len(result) == 2
+        assert set(result.index) == {"group", "treatment", "<All variables>"}
+        # factors use k - 1 degrees of freedom, as in R
+        n = len(varespec_data)
+        r2 = result.loc["treatment", "r2"]
+        expected = 1 - (1 - r2) * (n - 1) / (n - 3 - 1)
+        assert result.loc["treatment", "r2adj"] == pytest.approx(expected)

@@ -2,6 +2,7 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 
 def plot_dbrda(plot_data, figsize=(10, 8), colors=None, alpha_range=(0.5, 1.0)):
@@ -19,8 +20,9 @@ def plot_dbrda(plot_data, figsize=(10, 8), colors=None, alpha_range=(0.5, 1.0)):
     plot_data : pandas.DataFrame
         A long-form dataframe prepared by prepare_plot_data containing
         the variables with their effect sizes and an indicator for significance.
-        Expected columns are 'feature' for features, 'variable' for effect type,
-        'value' for effect size, and 'significant' for significance indication.
+        Expected columns are 'feature' for features (categorical, in plot
+        order), 'variable' for effect type, 'value' for effect size, and
+        'significant' for significance indication.
     figsize : tuple, default (10, 8)
         Figure size as (width, height).
     colors : dict, optional
@@ -42,8 +44,13 @@ def plot_dbrda(plot_data, figsize=(10, 8), colors=None, alpha_range=(0.5, 1.0)):
     # Create figure and axis
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Get unique features and their order
-    features = plot_data["feature"].cat.categories
+    # Features in plot order; like ggplot, drop levels without data
+    # (e.g. "<All variables>")
+    names = plot_data["feature"]
+    if not isinstance(names.dtype, pd.CategoricalDtype):
+        names = pd.Categorical(names, categories=list(dict.fromkeys(names)))
+    names = pd.Series(names, index=plot_data.index).cat.remove_unused_categories()
+    features = names.cat.categories
     n_features = len(features)
 
     # Set up y positions
@@ -58,7 +65,7 @@ def plot_dbrda(plot_data, figsize=(10, 8), colors=None, alpha_range=(0.5, 1.0)):
         values = []
         alphas = []
         for feature in features:
-            feature_data = data_subset[data_subset["feature"] == feature]
+            feature_data = data_subset[names[data_subset.index] == feature]
             if not feature_data.empty:
                 values.append(feature_data["value"].iloc[0])
                 significant = feature_data["significant"].iloc[0]
@@ -78,7 +85,7 @@ def plot_dbrda(plot_data, figsize=(10, 8), colors=None, alpha_range=(0.5, 1.0)):
         )
 
         # Set individual alpha for each bar
-        for bar, alpha in zip(bars, alphas):
+        for bar, alpha in zip(bars, alphas, strict=True):
             bar.set_alpha(alpha)
 
     # Customize the plot
