@@ -216,5 +216,27 @@ __marimo__/
 .streamlit/secrets.toml
 
 R_implementation/
-.devcontainer/
 .claude/
+
+# Secrets
+.env.*
+!.env.example
+
+# VS Code: share project config, ignore the rest
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+
+COMPARISON.html
+R_bug_report.md

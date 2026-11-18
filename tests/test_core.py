@@ -1,6 +1,5 @@
 """Tests for core analysis functions."""
 
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,6 +11,7 @@ from pyrda.core import (
     prepare_plot_data,
     rldbrda,
 )
+from pyrda.rrandom import RRandom
 
 
 class TestComputeDistanceMatrix:
@@ -198,12 +198,10 @@ class TestRldbrda:
         # Create data with no real patterns
         np.random.seed(42)
         df = pd.DataFrame(
-            np.random.rand(10, 5),
-            columns=[f"species_{i}" for i in range(5)]
+            np.random.rand(10, 5), columns=[f"species_{i}" for i in range(5)]
         )
         meta = pd.DataFrame(
-            np.random.rand(10, 3),
-            columns=[f"env_{i}" for i in range(3)]
+            np.random.rand(10, 3), columns=[f"env_{i}" for i in range(3)]
         )
 
         with pytest.raises(ValueError, match="No significant features found"):
@@ -216,3 +214,137 @@ class TestRldbrda:
 
         with pytest.raises(ValueError):
             rldbrda(df, meta)
+
+
+class TestRCompatibility:
+    """Behaviour that mirrors vegan/RLdbRDA."""
+
+    @pytest.fixture
+    def data(self):
+        rng = np.random.default_rng(5)
+        n = 20
+        x = rng.normal(size=n)
+        df = pd.DataFrame(
+            rng.poisson(np.exp(1 + np.outer(x, rng.normal(size=15)))),
+            index=[f"s{i}" for i in range(n)],
+        )
+        meta = pd.DataFrame(
+            {
+                "x": x,
+                "x_copy": x,
+                "noise": rng.normal(size=n),
+                "grp": rng.choice(["a", "b", "c"], n),
+            },
+            index=df.index,
+        )
+        return df, meta
+
+    def test_bh_matches_r_p_adjust(self):
+        from pyrda.core import _p_adjust_bh
+
+        # p.adjust(c(0.01, 0.04, 0.03, 0.2, NA, 0.04), "BH") in R
+        got = _p_adjust_bh([0.01, 0.04, 0.03, 0.2, np.nan, 0.04])
+        expected = [0.05, 0.05, 0.05, 0.2, np.nan, 0.05]
+        np.testing.assert_allclose(got, expected, equal_nan=True)
+
+    def test_r2_uses_all_real_axes(self, data):
+        """R-squared is the share of the real (positive-eigenvalue) inertia."""
+        from pyrda.distance import vegdist
+
+        df, meta = data
+        d = vegdist(df)
+        n = len(d)
+        j = np.eye(n) - 1 / n
+        ev, vec = np.linalg.eigh(-0.5 * j @ (d**2) @ j)
+        pos = ev > 1e-8
+        y = vec[:, pos] * np.sqrt(ev[pos])
+        x = meta["x"].to_numpy() - meta["x"].mean()
+        fitted = np.outer(x, x @ y) / (x @ x)
+        expected = (fitted**2).sum() / (y**2).sum()
+        result = get_r2_single(d, meta, "x")
+        assert result["r2"] == pytest.approx(expected, rel=1e-10)
+
+    def test_seed_reproduces_and_changes_p_values(self, data):
+        df, meta = data
+        a = rldbrda(df, meta, p_cutoff=1, test="permutation", seed=1)
+        b = rldbrda(df, meta, p_cutoff=1, test="permutation", seed=1)
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_collinear_copy_is_never_selected(self, data):
+        df, meta = data
+        result = rldbrda(df, meta, p_cutoff=1, seed=1)
+        selected = result["RDAcumul_R2.adj"].dropna().index
+        assert not {"x", "x_copy"} <= set(selected)
+
+    def test_selection_does_not_depend_on_column_order(self, data):
+        df, meta = data
+        reference = rldbrda(df, meta, p_cutoff=1, test="analytic")
+        ref_sel = list(reference["RDAcumul_R2.adj"].dropna().index)
+        for cols in (["grp", "noise", "x", "x_copy"], ["noise", "grp", "x", "x_copy"]):
+            other = rldbrda(df, meta[cols], p_cutoff=1, test="analytic")
+            assert list(other["RDAcumul_R2.adj"].dropna().index) == ref_sel
+
+    def test_constant_variable_is_handled(self, data):
+        df, meta = data
+        meta = meta.assign(const=1.0)
+        with pytest.warns(UserWarning, match="no variation"):
+            result = get_r2(_compute_distance_matrix(df), meta, seed=1)
+        assert result.loc["const", "r2"] == 0
+        assert np.isnan(result.loc["const", "pval"])
+
+    def test_all_variables_row_and_plot_fill(self, data):
+        df, meta = data
+        result = rldbrda(df, meta, p_cutoff=1, seed=1)
+        assert "<All variables>" in result.index
+        r2_all = result.loc["<All variables>", "RDAcumul_R2.adj"]
+        plot = prepare_plot_data(result)
+        assert "<All variables>" not in set(plot["feature"])
+        not_selected = result.index[result["RDAcumul_R2.adj"].isna()]
+        filled = plot[
+            plot["feature"].isin(not_selected) & (plot["variable"] == "RDAcumul_R2.adj")
+        ]
+        assert (filled["value"] == r2_all).all()
+        assert (filled["significant"] == 0).all()
+        assert list(plot["feature"].cat.categories) == list(result.index[::-1])
+
+    @pytest.mark.parametrize("test", ["analytic", "permutation"])
+    def test_all_tests_run(self, data, test):
+        df, meta = data
+        result = rldbrda(df, meta, p_cutoff=1, test=test, seed=2)
+        p = result["pval"].dropna()
+        assert ((p > 0) & (p <= 1)).all()
+
+    def test_invalid_test_name(self, data):
+        df, meta = data
+        with pytest.raises(ValueError, match="test must be one of"):
+            rldbrda(df, meta, test="bogus")
+        with pytest.raises(ValueError, match="test must be one of"):
+            rldbrda(df, meta, test="parametric")  # removed: far too conservative
+
+    def test_analytic_close_to_permutation(self, data):
+        df, meta = data
+        d = _compute_distance_matrix(df)
+        perm = get_r2(d, meta, test="permutation", permutations=19999, seed=4)
+        analytic = get_r2(d, meta, permutations=19999)
+        np.testing.assert_allclose(analytic["pval"], perm["pval"], atol=0.01)
+
+    def test_analytic_warns_but_never_permutes(self):
+        """Skewed permutation distributions give a warning naming the variable."""
+        rng = np.random.default_rng(3)
+        n = 40
+        x = rng.normal(size=n)
+        counts = rng.poisson(5, size=(n, 30)).astype(float)
+        counts[0] *= 50  # one sample dominates a Euclidean ordination
+        df = pd.DataFrame(counts, index=[f"s{i}" for i in range(n)])
+        skewed = np.exp(rng.normal(0, 1.5, n))
+        skewed[0] = skewed.max() * 3
+        meta = pd.DataFrame({"x": x, "skewed": skewed}, index=df.index)
+        d = _compute_distance_matrix(df, method="euclidean")
+
+        class NoPermutations(RRandom):
+            def shuffle_set(self, n, nperm):
+                raise AssertionError("analytic test must not permute")
+
+        with pytest.warns(UserWarning, match=r"'skewed'.*test='permutation'"):
+            result = get_r2(d, meta, test="analytic", seed=NoPermutations(1))
+        assert result["pval"].notna().all()

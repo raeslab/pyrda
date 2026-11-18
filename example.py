@@ -95,8 +95,11 @@ def main():
         results = rldbrda(
             varespec,
             varechem,
-            method="braycurtis",  # Bray-Curtis dissimilarity
-            p_cutoff=0.2,  # Significance threshold
+            method="bray",  # Bray-Curtis dissimilarity (vegan::vegdist names)
+            p_cutoff=0.05,  # Significance threshold
+            # test="permutation", seed=1 would reproduce set.seed(1) +
+            # RLdbRDA::rldbrda() in R exactly; the default analytic test needs
+            # no permutations
         )
         print("   Analysis completed successfully!")
     except ValueError as e:

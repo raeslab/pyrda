@@ -4,30 +4,53 @@ A Python implementation of Distance-Based Redundancy Analysis (db-RDA) as practi
 
 ## Features
 
-- **Distance-Based Redundancy Analysis**: Perform constrained ordination to identify environmental drivers of community composition
-- **Multiple Distance Metrics**: Support for Bray-Curtis, Euclidean, Manhattan, and other distance measures
-- **Statistical Testing**: Permutation-based significance testing with multiple testing correction
+- **Same results as RLdbRDA**: R², adjusted R², F, AIC and the forward selection match
+  `vegan::capscale`/`anova.cca`/`ordiR2step` to ~1e-14; with `test="permutation"` and the
+  same seed the p-values are identical to R's
+- **All vegan distances**: every `vegan::vegdist` index (except `robust.aitchison`), same names
+- **Statistical Testing**: by default a permutation-free analytic test that gives R's
+  permutation p-values without permuting (fast and deterministic); R's permutation tests
+  are available too. Benjamini-Hochberg correction as in R
 - **Forward Selection**: Stepwise model building to identify non-redundant effects
 - **Visualization**: Create publication-ready plots showing individual and cumulative effect sizes
 - **Validation**: Comprehensive input validation and error checking
+
+## Development environment (dev container)
+
+Stack: Python 3.13 (uv), R 4.5 with vegan + [RLdbRDA](https://github.com/raeslab/RLdbRDA) preinstalled, Claude Code, VS Code dev container.
+
+Requirements: Docker Desktop, and VS Code with the **Dev Containers** extension (`ms-vscode-remote.remote-containers`).
+
+1. Clone the repository and open the folder in VS Code.
+2. Run `Dev Containers: Reopen in Container` from the Command Palette (`Ctrl+Shift+P`).
+3. The first build takes a few minutes; `uv sync` runs automatically.
+
+Key commands inside the container:
+
+```bash
+uv run python example.py                          # Python implementation
+uv run pytest                                     # tests
+uv run ruff check . && uv run ruff format .       # lint / format
+Rscript -e 'library(RLdbRDA); ?rldbrda'           # R reference implementation
+claude                                            # Claude Code
+```
 
 ## Installation
 
 ### From Source
 
 ```bash
-git clone https://github.com/raeslab/RLdbRDA.git
-cd RLdbRDA/pyrda
-pip install -e .
+git clone <this repository>
+cd pyrda
+uv sync          # or: pip install -e .
 ```
 
 ### Dependencies
 
-- Python ≥ 3.8
+- Python ≥ 3.10
 - numpy ≥ 1.20.0
 - pandas ≥ 1.3.0
 - scipy ≥ 1.7.0
-- scikit-learn ≥ 1.0.0
 - matplotlib ≥ 3.5.0
 
 ## Quick Start
@@ -40,8 +63,11 @@ from pyrda import rldbrda, prepare_plot_data, plot_dbrda
 species_data = pd.read_csv("species_abundance.csv", index_col=0)
 environmental_data = pd.read_csv("environmental_variables.csv", index_col=0)
 
-# Perform db-RDA analysis
-results = rldbrda(species_data, environmental_data, method="braycurtis", p_cutoff=0.05)
+# Perform db-RDA analysis (analytic p-values, no permutations)
+results = rldbrda(species_data, environmental_data, method="bray", p_cutoff=0.05)
+
+# Exactly the same output as set.seed(1); RLdbRDA::rldbrda(...) in R
+results_r = rldbrda(species_data, environmental_data, test="permutation", seed=1)
 
 # Prepare and create visualization
 plot_data = prepare_plot_data(results)
@@ -59,10 +85,12 @@ The main function `rldbrda()` performs the complete analysis workflow:
 from pyrda import rldbrda
 
 results = rldbrda(
-    df=species_data,           # Species abundance matrix
-    meta=environmental_data,   # Environmental metadata
-    method="braycurtis",       # Distance metric
-    p_cutoff=0.05             # Significance threshold
+    df=species_data,  # Species abundance matrix
+    meta=environmental_data,  # Environmental metadata
+    method="bray",  # Distance metric (vegan::vegdist name)
+    p_cutoff=0.05,  # Significance threshold
+    test="analytic",  # default; "permutation" runs R's permutation tests
+    seed=None,  # with test="permutation": seed=1 reproduces set.seed(1) in R
 )
 ```
 
@@ -70,8 +98,24 @@ results = rldbrda(
 
 - **df**: pandas.DataFrame with samples as rows and species as columns
 - **meta**: pandas.DataFrame with samples as rows and environmental variables as columns
-- **method**: Distance metric ("braycurtis", "euclidean", "manhattan", etc.)
+- **method**: any `vegan::vegdist` method ("bray", "jaccard", "euclidean", "hellinger",
+  "gower", ...; scipy's "braycurtis" is accepted too). Other names go to
+  `scipy.spatial.distance.pdist` and have no R equivalent.
 - **p_cutoff**: Significance threshold for variable selection (default: 0.05)
+- **test**: how p-values are computed
+  - `"analytic"` (default): no permutations. Uses the exact mean, variance and skewness
+    of the permutation distribution (Pearson type III approximation); p-values agree with
+    R's permutation test within its own Monte Carlo error and are deterministic. When a
+    test's permutation distribution is strongly skewed (a few samples dominate the
+    variation, e.g. Euclidean distance on raw counts) the approximation can be off; a
+    warning then names the affected variables so you can check them with
+    `test="permutation"`
+  - `"permutation"`: vegan's permutation tests, 999 permutations per variable and 9999
+    per forward-selection step, exactly as RLdbRDA
+- **permutations** / **cumul_permutations**: number of permutations (default 999 / 9999);
+  the analytic test reports its p-values on the same scale (smallest value 1/1000)
+- **seed**: seed of the R-compatible random generator used by `test="permutation"`;
+  `seed=s` gives the same permutations as `set.seed(s)` in R
 
 ### Results Interpretation
 
@@ -79,9 +123,12 @@ The results DataFrame contains:
 
 - **r2**: Individual R² values for each variable
 - **r2adj**: Adjusted R² values
-- **pval**: Raw p-values from permutation tests
+- **pval**: p-values of the (analytic or permutation) pseudo-F test
 - **padj**: Benjamini-Hochberg adjusted p-values
-- **RDAcumul_R2.adj**: Cumulative R² from forward selection (for significant variables)
+- **RDAcumul_R2.adj**: Cumulative R² from forward selection (for significant variables);
+  the `<All variables>` row holds the adjusted R² of the model with all significant variables
+- **RDAcumul_Df / RDAcumul_AIC / RDAcumul_F / RDAcumul_pval**: test of each forward-selection
+  step, as reported by `ordiR2step`
 
 ### Visualization
 
@@ -95,10 +142,13 @@ plot_data = prepare_plot_data(results)
 fig = plot_dbrda(plot_data, figsize=(10, 8))
 
 # Customize colors if desired
-fig = plot_dbrda(plot_data, colors={
-    "r2adj": "#60A68B",           # Individual R²
-    "RDAcumul_R2.adj": "#1F4068"  # Cumulative R²
-})
+fig = plot_dbrda(
+    plot_data,
+    colors={
+        "r2adj": "#60A68B",  # Individual R²
+        "RDAcumul_R2.adj": "#1F4068",  # Cumulative R²
+    },
+)
 ```
 
 ## Example
@@ -106,8 +156,7 @@ fig = plot_dbrda(plot_data, colors={
 See `example.py` for a complete working example using the varespec/varechem datasets.
 
 ```bash
-cd pyrda
-python example.py
+uv run python example.py
 ```
 
 ## Data Requirements
@@ -143,40 +192,49 @@ PyRDA implements a two-step db-RDA procedure:
 
 ### Statistical Approach
 
-- **Distance Matrix**: Computed using scipy.spatial.distance
-- **Constrained Ordination**: Approximated using Principal Coordinates Analysis + linear regression
-- **Significance Testing**: Permutation-based F-tests
+- **Distance Matrix**: port of `vegan::vegdist`
+- **Constrained Ordination**: as `vegan::capscale`: principal coordinates on all axes with
+  positive eigenvalues, then redundancy analysis; negative eigenvalues are left out of R²
+- **Significance Testing**: pseudo-F as `anova.cca`; p-values from the exact moments of the
+  permutation distribution (default) or from the permutations themselves
 - **Multiple Testing**: Benjamini-Hochberg false discovery rate correction
-- **Forward Selection**: Greedy stepwise addition based on R² improvement
+- **Forward Selection**: as `vegan::ordiR2step(Pin = 1, R2scope = TRUE)`: add the variable
+  with the largest adjusted R² while it increases and stays at or below the adjusted R² of
+  the model with all significant variables
 
 ## Comparison with R Implementation
 
-PyRDA is designed to produce results comparable to the original R package RLdbRDA:
+PyRDA reproduces RLdbRDA. Statistics agree to ~1e-14. With `test="permutation", seed=s`
+the p-values are identical to `set.seed(s); rldbrda(...)` in R; with the default analytic
+test they agree within R's own run-to-run variation, and the selected variables match R's
+most frequent result.
 
-- **Same statistical methodology**: db-RDA with forward selection
-- **Compatible output format**: Similar result structure and column names
-- **Equivalent visualizations**: Matching plot aesthetics and interpretation
+### Known differences
 
-### Key Differences
-
-- **Implementation**: Python/scikit-learn vs R/vegan
-- **Ordination**: Classical MDS approximation vs direct capscale
-- **Dependencies**: Pure Python ecosystem vs R/Bioconductor
+- **Ties in forward selection**: when adding a variable gives exactly the adjusted R² of
+  the full model, R decides `R2 <= R2.all` by floating-point rounding, so its selection can
+  change with the column order of `meta`. PyRDA treats equal values as equal and adds the
+  variable.
+- **Crash cases**: where R stops with an error (a constant metadata column, or no variable
+  improving the model) PyRDA warns and continues.
+- **Row order**: R sorts on R² as text, which misplaces variables with R² < 1e-4; PyRDA
+  sorts numerically.
+- **`robust.aitchison`** is not available (vegan imputes zeros with OptSpace).
 
 ## Testing
 
 Run the test suite:
 
 ```bash
-cd pyrda
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 The tests include:
 
 - Unit tests for individual functions
 - Integration tests with example data
-- Comparison with expected R outputs (when available)
+- Exact comparison with RLdbRDA output (`tests/data/r_reference`, regenerate with
+  `Rscript generate.R` in that folder)
 - Edge case validation
 
 ## Development
@@ -186,9 +244,8 @@ The tests include:
 The package uses ruff for code formatting and linting:
 
 ```bash
-pip install ruff
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 ```
 
 ### Contributing
