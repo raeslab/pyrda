@@ -7,14 +7,14 @@ name = "pyrda"
 version = "0.1.0"
 description = "Python implementation of Distance-Based Redundancy Analysis"
 readme = "README.md"
-license = {text = "MIT"}
+license = "GPL-2.0-only"
+license-files = ["LICENSE"]
 authors = [
     {name = "Sebastian Proost", email = "sebastian.proost@gmail.com"}
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
