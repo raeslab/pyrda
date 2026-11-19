@@ -1,6 +1,6 @@
 # PyRDA: Python Distance-Based Redundancy Analysis
 
-A Python implementation of Distance-Based Redundancy Analysis (db-RDA) as practiced in the RaesLab. This package provides a streamlined workflow for conducting db-RDA analysis on microbial datasets to identify and visualize the impact of metadata variables on community composition.
+A Python implementation of Distance-Based Redundancy Analysis (db-RDA) as practiced in the RaesLab ([source code](https://github.com/raeslab/pyrda)). This package provides a streamlined workflow for conducting db-RDA analysis on microbial datasets to identify and visualize the impact of metadata variables on community composition.
 
 ## Features
 
@@ -37,10 +37,16 @@ claude                                            # Claude Code
 
 ## Installation
 
+### From GitHub
+
+```bash
+uv add git+https://github.com/raeslab/pyrda        # or: pip install git+https://github.com/raeslab/pyrda
+```
+
 ### From Source
 
 ```bash
-git clone <this repository>
+git clone https://github.com/raeslab/pyrda
 cd pyrda
 uv sync          # or: pip install -e .
 ```
@@ -259,7 +265,7 @@ uv run ruff format .
 
 ## Support
 
-- **Issues**: Report bugs and request features on GitHub Issues
+- **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/raeslab/pyrda/issues)
 - **Documentation**: See docstrings in the source code
 - **Examples**: Check the `example.py` script for usage patterns
 

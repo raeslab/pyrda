@@ -40,9 +40,9 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/raeslab/RLdbRDA"
-"Bug Reports" = "https://github.com/raeslab/RLdbRDA/issues"
-"Source" = "https://github.com/raeslab/RLdbRDA"
+"Homepage" = "https://github.com/raeslab/pyrda"
+"Bug Reports" = "https://github.com/raeslab/pyrda/issues"
+"Source" = "https://github.com/raeslab/pyrda"
 
 [tool.ruff]
 line-length = 88
