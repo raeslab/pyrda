@@ -15,7 +15,7 @@ class TestIntegrationWithExampleData:
     @pytest.fixture
     def varespec_data(self):
         """Load varespec test data."""
-        data_path = os.path.join(os.path.dirname(__file__), "../data/varespec.tsv")
+        data_path = os.path.join(os.path.dirname(__file__), "../docs/data/varespec.tsv")
         if os.path.exists(data_path):
             df = pd.read_csv(data_path, sep="\t", index_col=0)
             return df
@@ -31,7 +31,7 @@ class TestIntegrationWithExampleData:
     @pytest.fixture
     def varechem_data(self):
         """Load varechem test data."""
-        data_path = os.path.join(os.path.dirname(__file__), "../data/varechem.tsv")
+        data_path = os.path.join(os.path.dirname(__file__), "../docs/data/varechem.tsv")
         if os.path.exists(data_path):
             df = pd.read_csv(data_path, sep="\t", index_col=0)
             return df

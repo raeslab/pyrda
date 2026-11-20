@@ -13,8 +13,8 @@ from .rrandom import RRandom
 from .validation import validate_input
 
 __version__ = "0.1.0"
-__author__ = "Claude Code"
-__email__ = "noreply@anthropic.com"
+__author__ = "Sebastian Proost"
+__email__ = "sebastian.proost@gmail.com"
 
 __all__ = [
     "rldbrda",

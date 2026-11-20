@@ -1,9 +1,9 @@
 """Compare pyrda with RLdbRDA output stored in tests/data/r_reference.
 
-The reference files are produced by ``tests/data/r_reference/generate.R`` with
-``set.seed()``; with ``test="permutation"`` and the same seed the p-values must
-match exactly, not just approximately. The default analytic test is checked
-against the same files with a tolerance.
+The reference files are frozen RLdbRDA output, made with ``set.seed()`` (see
+docs/dev.md for how); with ``test="permutation"`` and the same seed the
+p-values must match exactly, not just approximately. The default analytic test
+is checked against the same files with a tolerance.
 """
 
 from pathlib import Path
@@ -38,7 +38,10 @@ def read(path):
 
 def run_case(name):
     if name.startswith("varespec"):
-        df, meta = read(ROOT / "data/varespec.tsv"), read(ROOT / "data/varechem.tsv")
+        df, meta = (
+            read(ROOT / "docs/data/varespec.tsv"),
+            read(ROOT / "docs/data/varechem.tsv"),
+        )
         seed = int(name.removeprefix("varespec_seed"))
         return rldbrda(df, meta, test="permutation", seed=seed)
     case, method, _ = name.split("_")
@@ -108,7 +111,10 @@ def test_analytic_default_close_to_r(name):
     """Default test: same statistics, p-values within R's Monte Carlo error."""
     r = read(REF / f"{name}.tsv")
     if name.startswith("varespec"):
-        df, meta = read(ROOT / "data/varespec.tsv"), read(ROOT / "data/varechem.tsv")
+        df, meta = (
+            read(ROOT / "docs/data/varespec.tsv"),
+            read(ROOT / "docs/data/varechem.tsv"),
+        )
         py = rldbrda(df, meta)
     else:
         case, method, _ = name.split("_")
