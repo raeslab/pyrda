@@ -378,3 +378,29 @@ This Python implementation is based on the original R package
 [RLdbRDA](https://github.com/raeslab/rldbrda) developed by Sebastian Proost for the
 RaesLab. The statistical methodology follows established practices in microbial ecology
 and community analysis.
+
+## References
+
+The default analytic test (`test="analytic"`) computes p-values without permutations, using
+the method of:
+
+- Kazi-Aoual, F., Hitier, S., Sabatier, R. & Lebreton, J.-D. (1995). Refined
+  approximations to permutation tests for multivariate inference. *Computational
+  Statistics & Data Analysis*, 20(6), 643-656.
+  [doi:10.1016/0167-9473(94)00064-2](https://doi.org/10.1016/0167-9473(94)00064-2)
+
+Every pseudo-F test in the workflow is equivalent to a permutation test on
+`tr(A P G P')`, with `G` the Gower matrix of the principal coordinates, `A` the projection
+onto the constraints and `P` a permutation of the samples. Kazi-Aoual et al. give the exact
+mean, variance and third moment of this statistic over all `n!` permutations; the p-value
+is then read from a Pearson type III distribution with those three moments. pyrda derives
+the same moments in a different, generic way (see `src/pyrda/moments.py`); they agree with
+the published closed-form expressions to machine precision.
+
+An open-access discussion of these approximations, including the Pearson type III
+approximation, is given by:
+
+- Josse, J., Pagès, J. & Husson, F. (2008). Testing the significance of the RV
+  coefficient. *Computational Statistics & Data Analysis*, 53(1), 82-91.
+  [doi:10.1016/j.csda.2008.06.012](https://doi.org/10.1016/j.csda.2008.06.012)
+  ([HAL preprint](https://hal.archives-ouvertes.fr/hal-00360535))
